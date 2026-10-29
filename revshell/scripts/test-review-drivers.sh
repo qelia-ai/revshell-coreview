@@ -595,4 +595,46 @@ for driver in codex-review.sh agy-review.sh qwen-review.sh; do
   assert_contains "$TEST_ROOT/empty-$driver.err" "nothing to review"
 done
 
+# Temp leftovers (2026-10-29): a driver killed by TERM (or finishing normally) leaves none of its own temp entries
+# (prompt / last-message / output / capture files) in $TMPDIR. SIGKILL cannot be trapped: tmp-purge's registry is the
+# net for that (each prefix is registered with the line that creates it).
+mkdir -p "$TEST_ROOT/bin-term" "$TEST_ROOT/tmp-term"
+cat > "$TEST_ROOT/bin-term/codex" <<'STUB'
+#!/usr/bin/env bash
+echo "$$" > "$REVSHELL_TEST_TERM_PIDFILE"
+if [ "${REVSHELL_TEST_CODEX_EXIT_IMMEDIATELY:-0}" = 1 ]; then exit 0; fi
+exec sleep 60
+STUB
+# macOS `mktemp -t` ignores $TMPDIR (it uses the user temp dir), so this stub sends `-t NAME` into $TMPDIR for the test.
+cat > "$TEST_ROOT/bin-term/mktemp" <<'STUB'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-t" ]; then exec /usr/bin/mktemp "${TMPDIR%/}/$2"; fi
+exec /usr/bin/mktemp "$@"
+STUB
+chmod +x "$TEST_ROOT/bin-term/codex" "$TEST_ROOT/bin-term/mktemp"
+env PATH="$TEST_ROOT/bin-term:$PATH" TMPDIR="$TEST_ROOT/tmp-term/" REVSHELL_HEARTBEAT_SECONDS=0 REVSHELL_TERM_GRACE_SECONDS=1 \
+  REVSHELL_TEST_TERM_PIDFILE="$TEST_ROOT/term.pid" \
+  bash "$SCRIPT_DIR/codex-review.sh" --plan "$TEST_ROOT/plan-a.md" --phase plan --repo "$TEST_ROOT/repo" --timeout 60 \
+  > "$TEST_ROOT/term.out" 2> "$TEST_ROOT/term.err" &
+term_driver_pid=$!
+attempt=0
+while [ ! -s "$TEST_ROOT/term.pid" ]; do
+  attempt=$((attempt + 1)); [ "$attempt" -lt 100 ] || fail "term case: the codex stub never started"; sleep 0.1
+done
+[ -n "$(ls -A "$TEST_ROOT/tmp-term")" ] || fail "term case: the driver created no temp entries, the test proves nothing"
+kill -TERM "$term_driver_pid"
+set +e; wait "$term_driver_pid"; set -e
+sleep 1
+leftover="$(ls -A "$TEST_ROOT/tmp-term")"
+[ -z "$leftover" ] || fail "codex-review.sh left temp entries after TERM: $leftover"
+
+set +e
+env PATH="$TEST_ROOT/bin-term:$PATH" TMPDIR="$TEST_ROOT/tmp-term/" REVSHELL_HEARTBEAT_SECONDS=0 REVSHELL_TERM_GRACE_SECONDS=1 \
+  REVSHELL_TEST_CODEX_EXIT_IMMEDIATELY=1 REVSHELL_TEST_TERM_PIDFILE="$TEST_ROOT/normal.pid" \
+  bash "$SCRIPT_DIR/codex-review.sh" --plan "$TEST_ROOT/plan-a.md" --phase plan --repo "$TEST_ROOT/repo" --timeout 60 \
+  > "$TEST_ROOT/normal.out" 2> "$TEST_ROOT/normal.err"
+set -e
+leftover="$(ls -A "$TEST_ROOT/tmp-term")"
+[ -z "$leftover" ] || fail "codex-review.sh left temp entries after normal completion: $leftover"
+
 printf 'PASS: revshell drivers (codex, agy, qwen) are observable, concurrent, verdict-safe, and timeout-clean\n'

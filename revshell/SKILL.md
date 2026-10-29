@@ -1,6 +1,6 @@
 ---
 name: revshell
-description: "REVSHELL — single-session in-shell review gate. The host agent implements a change, then drives a REVIEWER as a blocking subprocess to review the diff BEFORE it lands. BLOCKING MEANS IN-TURN: launch the round detached to a unique log, then block on it with scripts/await-log.sh (a foreground Bash call, tool timeout 600000) and RE-ISSUE it on exit 10 until it exits 0 — never hand the wait to Monitor or run_in_background and end your turn, because a background-completion notification does not wake a subagent and four measured sessions were lost that way (2026-08-16/17/19/20). TOP RULES (2026-08-08): (1) the host is barred from using an API key itself — no curl/SDK model call of its own — but MAY load and drive subscription-backed agents, which is what every backend below is; (2) the reviewer EDITS BY DEFAULT and fixes its own findings — every backend is edit-capable, agy included (driven with --mode accept-edits since 2026-09-18). ONE shared review contract used by every backend — Codex (DEFAULT as of 2026-07-28, ChatGPT SUBSCRIPTION not an API key, via scripts/codex-review.sh), agy (first fallback, via scripts/agy-review.sh, Gemini on its own subscription, edit-capable via --mode accept-edits), Qwen Code (second fallback, via scripts/qwen-review.sh, the regular in-shell `qwen` CLI with edit rights — no Ollama path implied; hosted/off-machine depending on the user's own Qwen config, still gated by scripts/confidentiality-guard.sh), a Claude review subagent — so review logic is never forked. No second human session or cross-session handoff watcher: the subprocess return IS the handoff. Use when the user says revshell / shellrev, 'review this in shell', 'have agy review this', wants a one-session implement-then-review loop, or as the review gate consumed by other skills (a project fix-gate, coreview's shellrev mode). Review rounds never create commits; approval lands curated commits merged to dev, deletes the temp branch, and ends with ONE memory commit. ONE ROUND WHEN BOTH SIDES AGREE (the owner, 2026-08-16): if the host accepts the reviewer's edits on inspection and no finding is left open, the round is over and it lands — never re-run the reviewer to confirm its own accepted edits, and never ask the user to confirm an agreement that already exists; a second round is for DISAGREEMENT only."
+description: "Review a plan or code diff through a subscription-backed CLI agent before merging. Use for revshell, shellrev, or a requested in-shell review. Runs one shared, edit-capable review contract through Codex, agy, Qwen Code, Claude, or explicitly requested Cursor; the host waits in-turn, inspects reviewer edits, verifies, and lands the result."
 ---
 
 # revshell — in-shell review gate (shared, model-agnostic)
@@ -1017,21 +1017,41 @@ degrades the contract (see below).
 ## Backend E — Cursor agent (`cursor-agent`), no driver script yet (2026-10-29)
 
 Use it only when the user asks for Cursor (the owner, 2026-10-29, asked for a simultaneous multi-model check that included Cursor). It runs on the user's Cursor subscription (`cursor-agent status` → "Logged in as …"). Never pass
-`--api-key` or set `CURSOR_API_KEY` (TOP RULE). `cursor-agent --list-models` lists its seats. A Grok or Composer
-seat gives a third provider beside Codex (OpenAI) and agy (Google).
+`--api-key` or set `CURSOR_API_KEY` (TOP RULE). Leave `--model` out when the user asks for Cursor's default;
+only pass an override when they choose a specific seat. The CLI's saved default can differ from the selection in
+another Cursor interface: record which route actually ran, and do not label an inherited `Auto` route as Grok.
+`cursor-agent --list-models` lists advertised seats, not proof that a request can use them. On 2026-10-29 it listed
+`grok-4.7-high`, while an explicit headless call failed with `AI Model Not Found`. That failure does not prove
+the model is unavailable in every route, or establish why the route failed. A failed route is not a completed
+review; report the error and follow the user's next choice without hand-editing their global model or authentication settings.
+
+**Verified interactive fallback, 2026-10-29:** at the user's direction, an owned `cursor-agent --mode ask --trust
+--workspace <scratch-dir>` session accepted `/model grok 4.7`; Enter selected `Grok 4.7 256K High` with Max Mode ON.
+A tiny prompt returned `GROK47_MAX_OK`. A subsequent headless `-p --mode ask --output-format json` call without
+`--model` returned `GROK47_DEFAULT_MAX_OK` in 5.3 seconds. The user-selected route therefore worked interactively
+and as the inherited CLI default. A later explicit `--model grok-4.7-high` call through `~/.local/bin/agent`
+returned `GROK47_EXPLICIT_HIGH_OK` in 11.0 seconds in that configuration; `agent` and `cursor-agent` resolved to
+the same installed binary. The inherited default remains the route to use when the user requests it.
+Preserve the picker settings: the safe model-only config fields showed
+`selectedModel.modelId` set to `grok-4.7`, parameters for 256K context, high reasoning and fast mode disabled, and
+`maxMode: true` both at the top level and under `model`. A model slug alone does not establish those parameters
+or Max Mode. Use the picker for a user-requested selection; do not rewrite config or dump authentication data.
+The successful smoke calls establish route availability, not a completed substantive review, and do not prove
+Max Mode caused the earlier failure.
 
 **MEASURED 2026-10-29: in `-p --mode plan`, `--output-format text` can return an EMPTY answer with exit 0.** A
 headless consultation (`grok-4.7-high`, a 1,200-word design question) wrote 1 byte to stdout and nothing to stderr,
 and exited 0. The same question re-run with `--output-format json` returned `{"type":"result","subtype":"success",
 "result": "<answer>", …}`, with an 8,769-character answer after 417 s. So:
 
-- Always run headless Cursor with `--output-format json` and read `.result`. Treat an empty `.result`, or an
-  `is_error: true`, as a FAILED round, never as "no findings".
+- Always run headless Cursor with `--output-format json` and read `.result`. Check both the process exit status
+  and the result: a nonzero exit, an empty `.result`, or `is_error: true` means a FAILED round, never "no findings".
+  A successful `cursor-agent status` login check does not establish that the model route works.
 - Put this line in the prompt: "write your whole answer as your final chat message; do not create a plan file or a
   to-do list instead". Plan mode otherwise tends to produce a plan, not an answer.
 - Read-only consultation: `--mode plan` (or `ask`). Edit-capable review: run it in the branch's worktree without
   `--mode plan`, under the shared contract (inlined diff, `VERDICT:` line, tagged edits). Never `--yolo`/`--force`.
-- Shape of the call: `cursor-agent -p --mode plan --model <seat> --trust --workspace <dir> --output-format json
+- Shape of the default-model call: `cursor-agent -p --mode plan --trust --workspace <dir> --output-format json
   "$(cat <prompt-file>)" < /dev/null`. Wrap it in `~/.claude/bin/claude-sub-slots run --owner "<who and what>" --`
   like every subscription shell, and close stdin.
 

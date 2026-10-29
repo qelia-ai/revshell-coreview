@@ -110,6 +110,27 @@ git -C "$REPO" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null && {
   echo "branch '$BRANCH' already exists in $REPO — pick a fresh name" >&2; exit 2; }
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/cxi-${BRANCH//\//-}-XXXXXX")"
+# THE CLONE IS IN THE MACHINE'S WORKTREE REGISTRY (2026-10-28): one row now, owned by this
+# script's pid ($$, recorded with its kernel start time), and one when the clone is removed or
+# kept. A SIGKILL skips the EXIT trap below; the first row then stays as the explicit recovery
+# state, and `claude-sub-slots disk worktrees --orphans` lists the clone once this pid is gone.
+# Nothing removes it automatically. Without the tool (another machine) this says so once and
+# carries on.
+SLOTS_TOOL="${CLAUDE_SLOTS_TOOL:-$HOME/.claude/bin/claude-sub-slots}"
+REGISTRY_SAID=0
+register_work() {   # <status> <purpose>
+  if [[ -x "$SLOTS_TOOL" ]] && "$SLOTS_TOOL" disk register-path --path "$WORK" --kind scratch \
+      --pid $$ --owner "codex-implement $BRANCH (from $REPO@$BASE)" --status "$1" \
+      --purpose "$2" </dev/null >/dev/null 2>&1; then
+    return 0
+  fi
+  if [[ "$REGISTRY_SAID" == "0" ]]; then
+    REGISTRY_SAID=1
+    echo "[codex-implement] clone not in the worktree registry ($SLOTS_TOOL disk register-path unavailable); carrying on" >&2
+  fi
+  return 0
+}
+register_work registered "codex-implement clone for branch $BRANCH"
 # THE CLONE IS DELETED ONLY WHEN ITS WORK IS SAFE SOMEWHERE ELSE (2026-09-21).
 # `LANDED=1` is set at exactly one place: after the branch has been fetched into
 # $REPO. Anything that ends this script before that -- codex failing, the harness
@@ -125,9 +146,12 @@ LANDED=0
 cleanup() {
   if [[ "$KEEP" == "1" ]]; then
     echo "[codex-implement] --keep: clone left at $WORK" >&2
+    register_work kept "--keep: clone left for inspection; remove it when done: rm -rf \"$WORK\""
   elif [[ "$LANDED" == "1" ]]; then
     rm -rf "$WORK"
+    [[ -e "$WORK" ]] || register_work removed "branch $BRANCH fetched into $REPO; clone removed"
   else
+    register_work kept-unlanded "recover with: git -C \"$REPO\" fetch \"$WORK\" \"$BRANCH:$BRANCH\""
     echo "[codex-implement] WORK KEPT (the branch was never fetched): $WORK" >&2
     echo "[codex-implement]   recover with: git -C \"$REPO\" fetch \"$WORK\" \"$BRANCH:$BRANCH\"" >&2
     echo "[codex-implement]   (or inspect it there; nothing else will clean it up)" >&2
