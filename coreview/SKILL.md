@@ -1,6 +1,6 @@
 ---
 name: coreview
-description: "COREVIEW — one cross-model plan + implementation review loop shared by Claude, Codex and Gemini (single source of truth). Two agents share one on-disk plan file: an IMPLEMENTER (writes plan then code) and a REVIEWER. The user picks mode + who implements + who reviews UPFRONT, then it runs end-to-end and finishes autonomously (reviewer audit → commit on dev/test, no push → save learnings). Three modes: 'coreview' (both sides may write to correct each other), 'coreviewlight' (reviewer only STEERS; implementer writes everything), and 'shellrev' (one session: Claude implements and drives Codex as reviewer via blocking codex exec calls — no second session, no watcher). Use when the user says coreview / coreviewlight / shellrev / claudereview, 'have <agent> review this', 'iterate with <agent>', 'review this with codex in shell', after writing a plan and wanting a second-model pass, or asks to monitor committed code. Only stop mid-loop for a question needing USER arbitration."
+description: "COREVIEW — one cross-model plan + implementation review loop shared by Claude, Codex and Gemini (single source of truth). Two agents share one on-disk plan file: an IMPLEMENTER (writes plan then code) and a REVIEWER. The user picks mode + who implements + who reviews UPFRONT, then it runs end-to-end and finishes autonomously (reviewer audit → commit on dev/test, no push → save learnings). Three modes: 'coreview' (both sides may write to correct each other), 'coreviewlight' (reviewer only STEERS; implementer writes everything), and 'shellrev' (one session: Claude implements and drives an in-shell REVIEWER via blocking subprocess calls through the revshell skill — default backend Codex; owner: revshell/SKILL.md, “Reviewer backend selection” — no second session, no watcher). Use when the user says coreview / coreviewlight / shellrev / claudereview, 'have <agent> review this', 'iterate with <agent>', 'review this in shell', after writing a plan and wanting a second-model pass, or asks to monitor committed code. Only stop mid-loop for a question needing USER arbitration."
 ---
 
 # COREVIEW — cross-model plan + implementation review (role- and runtime-neutral)
@@ -61,13 +61,13 @@ is missing, ask ONCE (a single grouped question), then run end-to-end.
 
 | Decision | Options | Default if unstated |
 |---|---|---|
-| **Mode** | `coreview` (both correct each other) / `coreviewlight` (reviewer steers only) / `shellrev` (Claude implements, Codex reviews in-shell — single session, no watcher) | infer from the trigger word; else `coreview` |
+| **Mode** | `coreview` (both correct each other) / `coreviewlight` (reviewer steers only) / `shellrev` (Claude implements, an in-shell REVIEWER reviews — default backend Codex; owner: revshell/SKILL.md, “Reviewer backend selection”; single session, no watcher) | infer from the trigger word; else `coreview` |
 | **Implementer** | Claude / Codex / Gemini | the host runtime |
 | **Reviewer** | Claude / Codex / Gemini (the other one) | the counterpart |
 | **Commit target** | `dev` / `test` | `dev` |
 | **Temp branch** | the branch/worktree the work lives on | the current feature branch |
 
-**`shellrev` shortcut:** in shellrev the roles are fixed — **Claude is host + implementer, Codex is the reviewer** — so the Implementer/Reviewer rows are pre-answered. There is also no counterpart session and no watcher to arm. Only **commit target** and **temp branch** remain to confirm. If the user said "shellrev" with a target, proceed with zero further questions.
+**`shellrev` shortcut:** in shellrev the roles are fixed — **Claude is host + implementer, an in-shell REVIEWER is driven via the revshell skill** (default backend `codex`; see revshell/SKILL.md → "Reviewer backend selection") — so the Implementer/Reviewer rows are pre-answered. There is also no counterpart session and no watcher to arm. Only **commit target** and **temp branch** remain to confirm. If the user said "shellrev" with a target, proceed with zero further questions.
 
 Bind your own role from this before touching the plan file:
 
@@ -307,25 +307,36 @@ block in place; treating `changes requested` as terminal.
 
 ---
 
-## Mode: `shellrev` — single session, Codex reviews in-shell (delegates to the `revshell` skill)
+## Mode: `shellrev` — single session, an in-shell REVIEWER (delegates to the `revshell` skill)
 
 `shellrev` collapses the two-session protocol into ONE autonomous host session: the host is
-implementer, and the reviewer (Codex by default) is invoked synchronously as a **blocking
-subprocess** each round — no second human session, no marker dance, **no background watcher**;
-the subprocess return *is* the handoff.
+implementer, and the reviewer is invoked synchronously as a **blocking subprocess** each
+round — no second human session, no marker dance, **no background watcher**; the subprocess
+return *is* the handoff.
 
 **The shellrev mechanism is its own standalone skill — `revshell` — which owns the hardened
-driver and the shared review contract.** Do not duplicate it here.
+drivers, the backend-selection order, and the shared review contract.** Do not duplicate any
+of that here.
 
-**REQUIRED SUB-SKILL:** Use the **`revshell`** skill. Its driver is
-`<revshell-skill-dir>/scripts/codex-review.sh` (resolves from the host runtime's own skills
-dir, e.g. `~/.claude/skills/revshell`). Run `--phase plan` until `ready for implementation`,
-then implement (working tree only — no per-round commits; at most one amendable WIP) and run
-`--phase code --base "$(git merge-base <target> HEAD)"` until
+> **"Blocking subprocess" means BLOCKING IN YOUR OWN TURN — it does NOT mean a plain
+> foreground Bash call.** A Bash call is capped at 600s and a round runs 250–3000s, so the
+> harness auto-backgrounds a naive foreground invocation. Launch the round detached to a
+> unique log, then block with `bash <revshell-skill-dir>/scripts/await-log.sh "$LOG"` (a
+> foreground Bash call, tool `timeout: 600000`), **re-issuing it on exit 10 until it exits
+> 0**. Never hand the wait to `Monitor` or `run_in_background` and end your turn: a
+> background-completion notification does not wake a subagent, and four measured sessions
+> were lost that way. Full mechanics and evidence: revshell/SKILL.md → TOP RULE.
+
+**REQUIRED SUB-SKILL:** Use the **`revshell`** skill. **Its default driver is
+`<revshell-skill-dir>/scripts/codex-review.sh`** (resolves from the host runtime's own skills
+dir, e.g. `~/.claude/skills/revshell`) — see revshell/SKILL.md → "Reviewer backend selection"
+for the full order (Codex → agy → Qwen). Run `--phase plan` until `ready for
+implementation`, then implement (working tree only — no per-round commits; at most one
+amendable WIP) and run `--phase code --base "$(git merge-base <target> HEAD)"` until
 `ready to ship` → **Finish sequence**. The same contract (inline diff, no exploration/recall,
-`file:line` findings, terminal `VERDICT:`) applies whether the reviewer is Codex or a Claude
-subagent. Re-verify any reviewer-written fix (`git diff` + focused tests). The convergence
-guard, Phase-1 discipline, Finish sequence, and no-push/no-promote guardrail are unchanged.
+`file:line` findings, terminal `VERDICT:`) applies no matter which backend is reviewing.
+Re-verify any reviewer-written fix (`git diff` + focused tests). The convergence guard,
+Phase-1 discipline, Finish sequence, and no-push/no-promote guardrail are unchanged.
 
 ---
 
@@ -402,7 +413,7 @@ during a long idle gap is normal, not a reason to stop.
 User: "coreview" (or coreviewlight / shellrev)
   ↓
 Upfront setup: mode + implementer + reviewer + commit target + temp branch  (the ONE pause)
-  (shellrev: implementer=Claude, reviewer=Codex pre-set; only target + branch to confirm)
+  (shellrev: implementer=Claude, reviewer=in-shell backend pre-set (Codex default, see revshell); only target + branch to confirm)
   ↓
 Phase 1 (regular & shellrev): implementer writes plan → reviewer corrects via plan-file edits
   → loop until reviewer: `ready for implementation`
@@ -410,7 +421,8 @@ Phase 1 (regular & shellrev): implementer writes plan → reviewer corrects via 
 Phase 2 / light loop: implementer writes code (parallel agents)
   regular:  reviewer reviews + directly implements every fixable finding; implementer addresses feedback  (watcher)
   light:    reviewer steers only; implementer applies every fix                   (watcher)
-  shellrev: Claude implements; `codex-review.sh` blocking call per round; Codex may fix (NO watcher)
+  shellrev: Claude implements; `codex-review.sh` blocking call per round (the reviewer fixes directly,
+            see revshell/SKILL.md) (NO watcher)
   → loop until reviewer: `ready to ship`
   ↓
 Finish (autonomous, host-driven):

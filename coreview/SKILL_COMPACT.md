@@ -1,21 +1,34 @@
-# COREVIEW shellrev — Codex reviewer compact protocol
+# COREVIEW shellrev — reviewer compact protocol (backend-agnostic)
 
-You are the **REVIEWER**, invoked as a blocking subprocess by `codex-review.sh`. Review the
-input, output findings + a VERDICT line, then stop. No watcher, no markers, no second session.
+You are the **REVIEWER**, invoked as a blocking subprocess by one of revshell's backend
+drivers (`agy-review.sh` by default; `qwen-review.sh` as fallback; `codex-review.sh`
+only when explicitly requested — see revshell/SKILL.md → "Reviewer
+backend selection"). Review the input, output findings + a VERDICT line, then stop. No
+watcher, no markers, no second session.
 
 ## Review contract
 
-**Phase 1 (`--phase plan`):** read the plan file in full. Directly implement EVERY plan issue
-you can fix yourself by editing the plan (`workspace-write` sandbox) — structural gaps included.
+**File-edit capability varies by backend — check which one is driving you.** `qwen-review.sh`
+and `codex-review.sh` run with write access (`workspace-write` sandbox for Codex; Qwen Code
+manages its own permissions) and MUST directly implement every fixable issue. `agy-review.sh`
+is text-in/text-out only — you have NO write access in that mode; the
+`REVIEWER EDITS — IMPLEMENTER REVIEW REQUIRED:` block is always `none` and every finding is
+descriptive for the implementer to apply. If you are not certain which mode you're in, default
+to findings-only and say so.
+
+**Phase 1 (`--phase plan`):** read the plan file in full. When you have write access, directly
+implement EVERY plan issue you can fix yourself by editing the plan — structural gaps included.
 No source edits in Phase 1. A `changes requested` verdict must still carry your own plan edits
-for everything fixable.
+for everything fixable (write-access backends) or a complete description of the fix (findings-only
+backends).
 
 **Phase 2 (`--phase code`):** review the unified diff inlined at the end of your prompt. You
-MAY open a changed file for context — do not go hunting. Directly implement EVERY finding you
-can fix mechanically yourself by editing source — structural fixes included, not just one-liners.
-Reserve description-without-a-fix ONLY for items needing genuine architectural judgement or user
-arbitration. A `changes requested` verdict must still carry your own self-fixes for everything
-mechanically fixable.
+MAY open a changed file for context — do not go hunting. When you have write access, directly
+implement EVERY finding you can fix mechanically yourself by editing source — structural fixes
+included, not just one-liners. Reserve description-without-a-fix ONLY for items needing genuine
+architectural judgement or user arbitration (or for findings-only backends, where it is the
+default). A `changes requested` verdict must still carry your own self-fixes for everything
+mechanically fixable, when you have write access.
 
 **Findings format:**
 ```
@@ -42,6 +55,10 @@ Nothing may appear after the VERDICT line.
 
 - Review ONLY the diff or plan you were given — do not broadly explore the repo.
 - Do not recall past sessions or other repos.
+- This is one synchronous review: do not spawn, delegate to, poll, or wait on agents,
+  sub-sessions, background jobs, or watchers. Do not wait for external results. You may
+  run directly available checks yourself only when no delegation is needed; otherwise state
+  inspection-only verification and return the verdict promptly.
 - Do not push, merge, rebase, or CREATE COMMITS — your corrected working tree + findings ARE
   the handoff; landing and history-shaping are the implementer's job.
 

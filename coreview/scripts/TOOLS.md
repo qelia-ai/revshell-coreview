@@ -12,7 +12,7 @@ to your runtime using this table.
 | Stop a watcher | `TaskStop <watcher-id>` | SIGINT the active watcher only after explicit stop/pause; `watch_plan.py` ignores signals unless `--allow-interrupt` | kill the bg job |
 | Dispatch parallel sub-agents (review slices, final audit, impl streams) | `Agent` tool (multiple in one message; `run_in_background: true` where useful) | native sub-agent / parallel task mechanism | native sub-agent mechanism |
 | Append your own marker | `bash <dir>/scripts/append-marker.sh "$PLAN" <impl\|review> ...` | same script | same script |
-| **`shellrev` mode** — reviewer in-shell (single session, NO watcher/markers) — see the standalone **`revshell`** skill | `bash <revshell-dir>/scripts/codex-review.sh --plan "$PLAN" --phase <plan\|code> --repo "$WORKTREE" [--base <ref>] [--context <file>]` — blocking; reads the parseable `VERDICT:` last line. `<revshell-dir>` = `~/.claude/skills/revshell` (or your runtime's) | n/a (host-driven by definition) | n/a |
+| **`shellrev` mode** — reviewer in-shell (single session, NO watcher/markers) — see the standalone **`revshell`** skill | `bash <revshell-dir>/scripts/agy-review.sh --plan "$PLAN" --phase <plan\|code> --repo "$WORKTREE" [--base <ref>] [--context <file>]` (default backend; fall back to `qwen-review.sh`, or `codex-review.sh` only on explicit user request — see revshell/SKILL.md → "Reviewer backend selection") — blocking; reads the parseable `VERDICT:` last line. `<revshell-dir>` = `~/.claude/skills/revshell` (or your runtime's) | n/a (host-driven by definition) | n/a |
 | Land + delete temp branch | `bash <dir>/scripts/finish.sh --repo R --target dev --temp-branch B ...` | same script | same script |
 | Save goal/resolution/learnings as ONE docs(memory) commit + refresh vectors | `bash <dir>/scripts/save-learnings.sh --repo R --slug s ...` | same script | same script |
 
@@ -21,10 +21,12 @@ symlink at `~/.claude/skills/coreview`, `~/.codex/skills/coreview`, or
 `~/.gemini/config/skills/coreview`.
 
 **`shellrev` is the exception to everything below:** it runs in a single host session and drives the
-reviewer with blocking subprocess calls via the standalone **`revshell`** skill (`codex-review.sh`).
-No background watcher, no markers, no second session — so the watcher invariants do not apply. The
-plan file is still the one shared artifact
-(Codex reads/edits it), but the handoff is the synchronous subprocess return. See SKILL.md "Mode: shellrev".
+reviewer with blocking subprocess calls via the standalone **`revshell`** skill — default backend
+`agy-review.sh`, Codex/`codex-review.sh` only on explicit user request (see revshell/SKILL.md →
+"Reviewer backend selection"). No background watcher, no markers, no second session — so the watcher
+invariants do not apply. The plan file is still the one shared artifact (the backend reads it, and
+edits it directly only for backends that can — agy/DeepSeek are findings-only), but the handoff is
+the synchronous subprocess return. See SKILL.md "Mode: shellrev".
 
 **Key invariants regardless of runtime (regular `coreview` / `coreviewlight`):**
 - Use a background mechanism that surfaces output as notifications — NOT a fire-and-forget
